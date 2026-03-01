@@ -74,8 +74,11 @@ async def main():
     control.userbot = userbot
 
     # Start both
-    await userbot.start()
-    logger.info("Userbot started")
+    userbot_started = await userbot.start()
+    if userbot_started:
+        logger.info("Userbot started")
+    else:
+        logger.warning("Userbot not started: interactive Telethon login is required")
 
     # Graceful shutdown
     stop_event = asyncio.Event()

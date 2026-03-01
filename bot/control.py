@@ -2,10 +2,12 @@
 
 import json
 import logging
+import io
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -28,6 +30,45 @@ def _cfg() -> Config:
 
 def _db() -> Database:
     return _bot_instance.db
+
+
+async def _send_qr_image(message: Message, link: str) -> bool:
+    try:
+        import qrcode
+
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        await message.answer_photo(
+            BufferedInputFile(buf.getvalue(), filename="userbot-login-qr.png"),
+            caption="📷 QR для авторизации userbot (действует ~2 минуты).",
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to build/send QR image: %s", e)
+        try:
+            import qrcode
+
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(link)
+            qr.make(fit=True)
+            matrix = qr.get_matrix()
+            ascii_qr = "\n".join(
+                "".join("██" if cell else "  " for cell in row)
+                for row in matrix
+            )
+            await message.answer(
+                "📷 PNG-QR не отправился, отправляю текстовый QR:\n"
+                f"<pre>{ascii_qr}</pre>",
+                parse_mode="HTML",
+            )
+            return True
+        except Exception as e2:
+            logger.warning("Failed to send ASCII QR fallback: %s", e2)
+            return False
 
 
 # ── Keyboards ──────────────────────────────────────────────────────
@@ -255,6 +296,8 @@ async def cb_settings(callback: CallbackQuery):
             callback_data="toggle_vision",
         )],
         [InlineKeyboardButton(text="📬 Кому уведомления", callback_data="set_notify")],
+        [InlineKeyboardButton(text="🔐 Авторизовать userbot", callback_data="auth_userbot")],
+        [InlineKeyboardButton(text="🔢 Ввести код вручную", callback_data="auth_userbot_code")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu")],
     ])
     await callback.message.edit_text(
@@ -281,6 +324,105 @@ async def cb_set_notify(callback: CallbackQuery):
         reply_markup=back_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "auth_userbot")
+async def cb_auth_userbot(callback: CallbackQuery):
+    if not _bot_instance.userbot:
+        await callback.answer("Userbot недоступен", show_alert=True)
+        return
+
+    await callback.answer()
+
+    try:
+        link = await _bot_instance.userbot.create_qr_login_link()
+    except Exception as e:
+        logger.error("Failed to generate userbot auth link: %s", e)
+        await callback.message.edit_text(
+            "❌ Не удалось подготовить авторизацию userbot.",
+            reply_markup=back_kb(),
+        )
+        return
+
+    if not link:
+        started = await _bot_instance.userbot.start()
+        text = "✅ Userbot уже авторизован и запущен." if started else "✅ Userbot уже авторизован."
+        await callback.message.edit_text(text, reply_markup=back_kb())
+        return
+
+    await callback.message.edit_text(
+        "🔐 Подтвердите вход по QR или по ссылке ниже.\n"
+        "QR/ссылка одноразовые и действуют ~2 минуты.",
+        reply_markup=back_kb(),
+    )
+    sent_qr = await _send_qr_image(callback.message, link)
+    if not sent_qr:
+        await callback.message.answer("⚠️ Не удалось отправить QR-код изображением, использую ссылку.")
+    await callback.message.answer(f"🔗 {link}")
+    await callback.message.answer("⏳ Жду подтверждения авторизации...")
+
+    result = await _bot_instance.userbot.wait_qr_login(timeout=180)
+    if result == "ok":
+        started = await _bot_instance.userbot.start()
+        if started:
+            await callback.message.answer("✅ Авторизация успешна, мониторинг запущен.")
+        else:
+            await callback.message.answer("✅ Авторизация успешна, но запуск userbot не удался.")
+    elif result == "need_2fa":
+        _bot_instance.awaiting[callback.from_user.id] = "auth_2fa"
+        await callback.message.answer(
+            "🔐 Для входа нужен 2FA-пароль.\n"
+            "Введите его одним сообщением — бот удалит ваше сообщение после обработки."
+        )
+    elif result == "timeout":
+        try:
+            status = await _bot_instance.userbot.request_login_code()
+        except Exception:
+            status = "error"
+        if status == "already_authorized":
+            started = await _bot_instance.userbot.start()
+            msg = "✅ Userbot уже авторизован и запущен." if started else "✅ Userbot уже авторизован."
+            await callback.message.answer(msg)
+        elif status == "sent":
+            _bot_instance.awaiting[callback.from_user.id] = "auth_code"
+            await callback.message.answer(
+                "⌛ Ссылка не подтверждена вовремя. Переключаю на ввод кода вручную.\n"
+                "Введите код из сообщения от аккаунта Telegram:"
+            )
+        else:
+            await callback.message.answer("⌛ Время ожидания истекло. Нажмите «🔐 Авторизовать userbot» ещё раз.")
+    else:
+        await callback.message.answer("❌ Авторизация не завершена.")
+
+
+@router.callback_query(F.data == "auth_userbot_code")
+async def cb_auth_userbot_code(callback: CallbackQuery):
+    if not _bot_instance.userbot:
+        await callback.answer("Userbot недоступен", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        status = await _bot_instance.userbot.request_login_code()
+    except Exception as e:
+        logger.error("Failed to request login code: %s", e)
+        await callback.message.edit_text("❌ Не удалось запросить код авторизации.", reply_markup=back_kb())
+        return
+
+    if status == "already_authorized":
+        started = await _bot_instance.userbot.start()
+        text = "✅ Userbot уже авторизован и запущен." if started else "✅ Userbot уже авторизован."
+        await callback.message.edit_text(text, reply_markup=back_kb())
+        return
+
+    _bot_instance.awaiting[callback.from_user.id] = "auth_code"
+    await callback.message.edit_text(
+        "🔢 Введите код из сообщения от аккаунта Telegram.\n"
+        "Код приходит в официальном Telegram (обычно не SMS).\n"
+        "Если после кода потребуется 2FA, бот попросит пароль.\n"
+        "Ваше сообщение с кодом будет удалено после обработки.",
+        reply_markup=back_kb(),
+    )
 
 
 # ── Pause / Resume ─────────────────────────────────────────────────
@@ -478,7 +620,10 @@ async def cb_help(callback: CallbackQuery):
         "🧪 <b>Тест</b> — проверить, сработает ли pipeline на вашем тексте или фото\n"
         "📋 <b>Последние находки</b> — 10 последних совпадений с типом и ценой\n"
         "⚙️ <b>Настройки</b> — включить/выключить Vision (анализ фото через Groq), "
-        "настроить канал уведомлений\n"
+        "настроить канал уведомлений и пройти авторизацию userbot\n"
+        "🔐 <b>Авторизовать userbot</b> — получить QR-код и ссылку входа\n"
+        "🔢 <b>Ввести код вручную</b> — вариант для старых версий Telegram, где tg://login не открывается\n"
+        "🔒 Сообщения с кодом/2FA для авторизации удаляются ботом после обработки\n"
         "🎯 <b>Управление действиями</b> — авто-DM, пересылка, dry-run режим, "
         "шаблон сообщения и список opt-out\n"
         "📜 <b>Лог действий</b> — последние 20 выполненных действий (DM / пересылка)\n"
@@ -539,6 +684,11 @@ async def handle_text_input(message: Message):
         return
 
     text = message.text.strip()
+    if action in {"auth_code", "auth_2fa"}:
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     if action == "chat_add":
         _cfg().monitoring.chats.append(text)
@@ -595,6 +745,54 @@ async def handle_text_input(message: Message):
                 _cfg().actions.notify_chat_id = text
         _save_config()
         await message.answer(f"✅ Уведомления: {_cfg().actions.notify_chat_id}")
+
+    elif action == "auth_code":
+        if not _bot_instance.userbot:
+            await message.answer("❌ Userbot недоступен.")
+        else:
+            result = await _bot_instance.userbot.sign_in_with_code(text)
+            if result == "ok":
+                started = await _bot_instance.userbot.start()
+                if started:
+                    await message.answer("✅ Авторизация успешна, мониторинг запущен.")
+                else:
+                    await message.answer("✅ Авторизация успешна, но userbot не запущен.")
+            elif result == "need_2fa":
+                _bot_instance.awaiting[message.from_user.id] = "auth_2fa"
+                await message.answer("🔐 Введите пароль 2FA:")
+                return
+            elif result == "invalid_code":
+                _bot_instance.awaiting[message.from_user.id] = "auth_code"
+                await message.answer("❌ Неверный код. Попробуйте ещё раз:")
+                return
+            elif result == "expired_code":
+                try:
+                    await _bot_instance.userbot.request_login_code()
+                    _bot_instance.awaiting[message.from_user.id] = "auth_code"
+                    await message.answer("⌛ Код истёк. Отправил новый, введите его:")
+                    return
+                except Exception:
+                    await message.answer("❌ Код истёк и не удалось запросить новый.")
+            else:
+                await message.answer("❌ Не удалось авторизоваться по коду.")
+
+    elif action == "auth_2fa":
+        if not _bot_instance.userbot:
+            await message.answer("❌ Userbot недоступен.")
+        else:
+            result = await _bot_instance.userbot.sign_in_with_password(text)
+            if result == "ok":
+                started = await _bot_instance.userbot.start()
+                if started:
+                    await message.answer("✅ Авторизация 2FA успешна, мониторинг запущен.")
+                else:
+                    await message.answer("✅ Авторизация 2FA успешна, но userbot не запущен.")
+            elif result == "invalid_2fa":
+                _bot_instance.awaiting[message.from_user.id] = "auth_2fa"
+                await message.answer("❌ Неверный пароль 2FA. Попробуйте снова:")
+                return
+            else:
+                await message.answer("❌ Не удалось выполнить 2FA авторизацию.")
 
     elif action == "test":
         from bot.keywords import KeywordMatcher

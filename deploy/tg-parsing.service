@@ -2,6 +2,8 @@
 Description=Telegram Chat Monitor Bot (tg-parsing)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,6 @@ WorkingDirectory=/home/ubuntu/tg-parsing
 ExecStart=/home/ubuntu/tg-parsing/venv/bin/python -u main.py
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 MemoryMax=512M
 MemoryHigh=384M
 NoNewPrivileges=yes

@@ -4,6 +4,12 @@ import asyncio
 import logging
 
 from telethon import TelegramClient, events
+from telethon.errors import (
+    PasswordHashInvalidError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    SessionPasswordNeededError,
+)
 from telethon.tl.types import Message
 
 from bot.models import Config, ForwardMode
@@ -47,15 +53,28 @@ class Userbot:
         # album debounce: group_id -> list[Message]
         self._album_buf: dict[int, list[Message]] = {}
         self._album_tasks: dict[int, asyncio.Task] = {}
+        self._started = False
+        self._pending_qr_login = None
+        self._phone_code_hash: str | None = None
 
-    async def start(self):
-        await self.client.start(phone=self.config.telegram.phone)
+    async def start(self) -> bool:
+        if self._started:
+            return True
+        await self.client.connect()
+        if not await self.client.is_user_authorized():
+            logger.error(
+                "Userbot is not authorized yet. "
+                "Use control bot: Settings -> Authorize userbot."
+            )
+            return False
+        self.client.session.save()
         logger.info("Userbot authorised as %s", (await self.client.get_me()).first_name)
 
         chats = self.config.monitoring.chats
         if not chats:
             logger.warning("No chats to monitor")
-            return
+            self._started = True
+            return True
 
         @self.client.on(events.NewMessage(chats=chats))
         async def on_message(event: events.NewMessage.Event):
@@ -70,6 +89,72 @@ class Userbot:
                 await self._process_message(msg)
 
         logger.info("Monitoring %d chats: %s", len(chats), chats)
+        self._started = True
+        return True
+
+    async def create_qr_login_link(self) -> str | None:
+        await self.client.connect()
+        if await self.client.is_user_authorized():
+            return None
+        self._pending_qr_login = await self.client.qr_login()
+        return self._pending_qr_login.url
+
+    async def wait_qr_login(self, timeout: int = 120) -> str:
+        if not self._pending_qr_login:
+            return "no_qr"
+        try:
+            await self._pending_qr_login.wait(timeout=timeout)
+            self._pending_qr_login = None
+            self.client.session.save()
+            return "ok" if await self.client.is_user_authorized() else "failed"
+        except asyncio.TimeoutError:
+            self._pending_qr_login = None
+            return "timeout"
+        except SessionPasswordNeededError:
+            self._pending_qr_login = None
+            return "need_2fa"
+
+    async def request_login_code(self) -> str:
+        await self.client.connect()
+        if await self.client.is_user_authorized():
+            return "already_authorized"
+        sent = await self.client.send_code_request(self.config.telegram.phone)
+        self._phone_code_hash = sent.phone_code_hash
+        return "sent"
+
+    async def sign_in_with_code(self, code: str) -> str:
+        if not self._phone_code_hash:
+            return "no_code_request"
+        try:
+            await self.client.sign_in(
+                self.config.telegram.phone,
+                code,
+                phone_code_hash=self._phone_code_hash,
+            )
+            self._phone_code_hash = None
+            self.client.session.save()
+            return "ok" if await self.client.is_user_authorized() else "failed"
+        except PhoneCodeInvalidError:
+            return "invalid_code"
+        except PhoneCodeExpiredError:
+            self._phone_code_hash = None
+            return "expired_code"
+        except SessionPasswordNeededError:
+            return "need_2fa"
+        except Exception as e:
+            logger.error("Code sign-in failed: %s", e)
+            return "error"
+
+    async def sign_in_with_password(self, password: str) -> str:
+        try:
+            await self.client.sign_in(password=password)
+            self.client.session.save()
+            return "ok" if await self.client.is_user_authorized() else "failed"
+        except PasswordHashInvalidError:
+            return "invalid_2fa"
+        except Exception as e:
+            logger.error("2FA sign-in failed: %s", e)
+            return "error"
 
     async def stop(self):
         # Cancel pending album tasks
@@ -78,6 +163,7 @@ class Userbot:
         self._album_tasks.clear()
         self._album_buf.clear()
         await self.client.disconnect()
+        self._started = False
         logger.info("Userbot disconnected")
 
     # ── Album debounce ─────────────────────────────────────────────
