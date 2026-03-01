@@ -3,6 +3,7 @@
 import json
 import logging
 import io
+import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -46,6 +47,48 @@ def _extract_chat_ref_from_message(message: Message) -> str | None:
         return f"@{username}" if username else str(fwd_chat.id)
 
     return None
+
+
+def _normalize_chat_ref_input(text: str) -> str | None:
+    value = (text or "").strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        username = value[1:]
+        if re.fullmatch(r"[A-Za-z0-9_]{5,64}", username):
+            return f"@{username}"
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return value
+    return None
+
+
+async def _handle_chat_add(message: Message, fallback_text: str = "") -> bool:
+    chat_ref = _extract_chat_ref_from_message(message)
+    if not chat_ref:
+        chat_ref = _normalize_chat_ref_input(fallback_text)
+    if not chat_ref:
+        await message.answer(
+            "❌ Не удалось определить чат из пересылки.\n"
+            "Если Telegram скрывает источник, введите @username или ID чата вручную."
+        )
+        return False
+    if chat_ref in _cfg().monitoring.chats:
+        await message.answer(f"ℹ️ Чат {chat_ref} уже в списке.")
+        return True
+
+    _cfg().monitoring.chats.append(chat_ref)
+    _save_config()
+    if _bot_instance.userbot:
+        await message.answer(
+            f"✅ Чат {chat_ref} добавлен.\n"
+            "⚠️ Для применения перезапустите сервис на хосте kc:\n"
+            "<code>sudo systemctl restart tg-parsing</code>",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(f"✅ Чат {chat_ref} добавлен.")
+    return True
 
 
 async def _send_qr_image(message: Message, link: str) -> bool:
@@ -129,6 +172,8 @@ def back_kb() -> InlineKeyboardMarkup:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    if _bot_instance.owner_id is None:
+        _bot_instance.owner_id = message.from_user.id
     stats = await _db().get_stats()
     chats_count = len(_cfg().monitoring.chats)
     status = "Пауза" if (_bot_instance.userbot and _bot_instance.userbot.paused) else "Активен"
@@ -314,6 +359,7 @@ async def cb_settings(callback: CallbackQuery):
         [InlineKeyboardButton(text="📬 Кому уведомления", callback_data="set_notify")],
         [InlineKeyboardButton(text="🔐 Авторизовать userbot", callback_data="auth_userbot")],
         [InlineKeyboardButton(text="🔢 Ввести код вручную", callback_data="auth_userbot_code")],
+        [InlineKeyboardButton(text="🔄 Перезапустить бота", callback_data="restart_bot")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu")],
     ])
     await callback.message.edit_text(
@@ -340,6 +386,14 @@ async def cb_set_notify(callback: CallbackQuery):
         reply_markup=back_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "restart_bot")
+async def cb_restart_bot(callback: CallbackQuery):
+    import os, signal
+    await callback.answer("Перезапускаю…", show_alert=False)
+    await callback.message.edit_text("🔄 Перезапускаю бота, подождите ~10 секунд и откройте /start…")
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 @router.callback_query(F.data == "auth_userbot")
@@ -626,27 +680,42 @@ async def cb_actions_log(callback: CallbackQuery):
 @router.callback_query(F.data == "help")
 async def cb_help(callback: CallbackQuery):
     text = (
-        "❓ <b>Справка по боту</b>\n\n"
-        "Бот мониторит Telegram-чаты на наличие объявлений, совпадающих с заданными "
-        "ключевыми словами или изображениями, и автоматически отправляет DM продавцам.\n\n"
-        "<b>Кнопки главного меню:</b>\n"
-        "📡 <b>Чаты</b> — список чатов для мониторинга; добавить/удалить чат\n"
-        "🔑 <b>Ключевые слова</b> — слова/фразы для поиска в тексте сообщений\n"
-        "💰 <b>Макс. цена</b> — фильтр: игнорировать объявления дороже заданной суммы\n"
-        "🧪 <b>Тест</b> — проверить, сработает ли pipeline на вашем тексте или фото\n"
-        "📋 <b>Последние находки</b> — 10 последних совпадений с типом и ценой\n"
-        "⚙️ <b>Настройки</b> — включить/выключить Vision (анализ фото через Groq), "
-        "настроить канал уведомлений и пройти авторизацию userbot\n"
-        "🔐 <b>Авторизовать userbot</b> — получить QR-код и ссылку входа\n"
-        "🔢 <b>Ввести код вручную</b> — вариант для старых версий Telegram, где tg://login не открывается\n"
-        "🔒 Сообщения с кодом/2FA для авторизации удаляются ботом после обработки\n"
-        "🎯 <b>Управление действиями</b> — авто-DM, пересылка, dry-run режим, "
-        "шаблон сообщения и список opt-out\n"
-        "📜 <b>Лог действий</b> — последние 20 выполненных действий (DM / пересылка)\n"
-        "⏸/▶️ <b>Пауза / Запуск</b> — приостановить или возобновить мониторинг\n\n"
-        "<b>Плейсхолдеры шаблона DM:</b>\n"
-        "<code>{type}</code>, <code>{price}</code>, <code>{link}</code>, "
-        "<code>{author}</code>, <code>{chat_title}</code>, <code>{message_snippet}</code>"
+        "❓ <b>Справка</b>\n\n"
+        "Userbot (Telethon) мониторит заданные Telegram-чаты. При совпадении ключевого слова "
+        "или распознавании нужного товара на фото (Groq Vision) — отправляет DM продавцу "
+        "и/или пересылает сообщение вам.\n\n"
+
+        "<b>Главное меню</b>\n"
+        "📡 <b>Чаты</b> — добавить/удалить чат. Введите <code>@username</code> или ID. "
+        "Можно переслать любое сообщение из нужного чата — бот извлечёт источник автоматически "
+        "(⚠️ не работает, если в группе запрещено сохранение контента).\n"
+        "🔑 <b>Ключевые слова</b> — слова/фразы через запятую, регистр не важен.\n"
+        "💰 <b>Макс. цена</b> — пропускать объявления дороже N ₽ (0 = без ограничений).\n"
+        "🧪 <b>Тест</b> — отправить боту текст или фото, как будто они пришли из чата.\n"
+        "📋 <b>Последние находки</b> — 10 последних совпадений из БД.\n"
+        "📜 <b>Лог действий</b> — 20 последних DM/пересылок/пропусков.\n"
+        "⏸/▶️ <b>Пауза / Запуск</b> — остановить или возобновить userbot без перезапуска.\n"
+        "📊 <b>Лимиты</b> — остаток квот DM и Vision (Groq API).\n\n"
+
+        "<b>Настройки</b>\n"
+        "👁 <b>Vision</b> — анализ фото через Groq (llava-v1.5-7b). Включить, если нужно "
+        "ловить объявления без текста.\n"
+        "📬 <b>Кому уведомления</b> — числовой chat_id или <code>me</code> (вам, определяется "
+        "после первой команды /start).\n"
+        "🔐 <b>Авторизовать userbot</b> — QR-код + ссылка <code>tg://login?token=…</code> для входа.\n"
+        "🔢 <b>Ввести код вручную</b> — если QR не работает: запрашивает код из приложения Telegram, "
+        "затем при необходимости 2FA-пароль. Оба сообщения удаляются сразу после обработки.\n"
+        "🔄 <b>Перезапустить бота</b> — мягкий SIGTERM; systemd поднимет сервис заново (~10 с).\n\n"
+
+        "<b>Управление действиями</b>\n"
+        "✉️ <b>Авто-DM</b> — включить/выключить отправку DM.\n"
+        "📤 <b>Пересылка</b> — пересылать совпавшее сообщение вам (forward_raw) "
+        "или отправлять уведомление с деталями (notify_with_meta).\n"
+        "🧪 <b>Dry-run</b> — режим отладки без реальных DM и пересылок.\n"
+        "📝 <b>Шаблон DM</b> — текст сообщения продавцу. Плейсхолдеры:\n"
+        "    <code>{type}</code> <code>{price}</code> <code>{link}</code> "
+        "<code>{author}</code> <code>{chat_title}</code> <code>{message_snippet}</code>\n"
+        "🚫 <b>Opt-out</b> — user_id через запятую; этим пользователям DM не отправляются."
     )
     await callback.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
     await callback.answer()
@@ -693,6 +762,20 @@ async def cb_limits(callback: CallbackQuery):
 
 # ── Text input handler ─────────────────────────────────────────────
 
+@router.message(F.forward_origin | F.forward_from_chat)
+async def handle_forwarded_input(message: Message):
+    action = _bot_instance.awaiting.get(message.from_user.id)
+    if action != "chat_add":
+        return
+    _bot_instance.awaiting.pop(message.from_user.id, None)
+    text = (message.text or message.caption or "").strip()
+    ok = await _handle_chat_add(message, fallback_text=text)
+    if not ok:
+        _bot_instance.awaiting[message.from_user.id] = "chat_add"
+        return
+    await message.answer("Главное меню:", reply_markup=main_menu_kb())
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text_input(message: Message):
     action = _bot_instance.awaiting.pop(message.from_user.id, None)
@@ -707,27 +790,10 @@ async def handle_text_input(message: Message):
             pass
 
     if action == "chat_add":
-        chat_ref = _extract_chat_ref_from_message(message) or text
-        if not chat_ref:
+        ok = await _handle_chat_add(message, fallback_text=text)
+        if not ok:
             _bot_instance.awaiting[message.from_user.id] = "chat_add"
-            await message.answer("❌ Не удалось определить чат. Пришлите @username/ID или перешлите сообщение из чата.")
             return
-        if chat_ref in _cfg().monitoring.chats:
-            await message.answer(f"ℹ️ Чат {chat_ref} уже в списке.")
-            await message.answer("Главное меню:", reply_markup=main_menu_kb())
-            return
-        _cfg().monitoring.chats.append(chat_ref)
-        _save_config()
-        if _bot_instance.userbot:
-            # Re-register chats requires restart; notify user
-            await message.answer(
-                f"✅ Чат {chat_ref} добавлен.\n"
-                "⚠️ Для применения перезапустите сервис на хосте kc:\n"
-                "<code>sudo systemctl restart tg-parsing</code>",
-                parse_mode="HTML",
-            )
-        else:
-            await message.answer(f"✅ Чат {chat_ref} добавлен.")
 
     elif action == "chat_del":
         try:
@@ -875,27 +941,17 @@ async def handle_text_input(message: Message):
 async def handle_photo_input(message: Message):
     action = _bot_instance.awaiting.pop(message.from_user.id, None)
     if action == "chat_add":
-        chat_ref = _extract_chat_ref_from_message(message)
-        if not chat_ref:
+        text = (message.caption or "").strip()
+        ok = await _handle_chat_add(message, fallback_text=text)
+        if not ok:
             _bot_instance.awaiting[message.from_user.id] = "chat_add"
-            await message.answer("❌ Не удалось определить чат из пересылки. Перешлите сообщение из чата или введите @username/ID.")
             return
-        if chat_ref in _cfg().monitoring.chats:
-            await message.answer(f"ℹ️ Чат {chat_ref} уже в списке.")
-            await message.answer("Главное меню:", reply_markup=main_menu_kb())
-            return
-        _cfg().monitoring.chats.append(chat_ref)
-        _save_config()
-        await message.answer(
-            f"✅ Чат {chat_ref} добавлен.\n"
-            "⚠️ Для применения перезапустите сервис на хосте kc:\n"
-            "<code>sudo systemctl restart tg-parsing</code>",
-            parse_mode="HTML",
-        )
         await message.answer("Главное меню:", reply_markup=main_menu_kb())
         return
 
     if action != "test":
+        if action:
+            _bot_instance.awaiting[message.from_user.id] = action
         return
 
     if not _cfg().monitoring.use_vision or not _cfg().vision.api_key:
@@ -939,6 +995,7 @@ class ControlBot:
         self.db = db
         self.userbot = None  # set externally after init
         self.awaiting: dict[int, str] = {}  # user_id -> action
+        self.owner_id: int | None = None   # set on first /start
         self.dm_limiter = dm_limiter
         self.vision_limiter = vision_limiter
 
@@ -950,13 +1007,16 @@ class ControlBot:
         _bot_instance = self
 
     async def send_notification(self, text: str):
-        """Send notification to the configured chat."""
+        """Send notification to the configured chat (or owner for 'me')."""
         chat_id = self.config.actions.notify_chat_id
         if chat_id == "me":
-            me = await self.bot.get_me()
-            # For "me", send to the bot owner — we use the first user who /start'd
-            # In practice, we send to saved_messages via userbot
-            logger.info("Notification (me): %s", text[:80])
+            if self.owner_id:
+                try:
+                    await self.bot.send_message(chat_id=self.owner_id, text=text)
+                except Exception as e:
+                    logger.error("Failed to send notification to owner: %s", e)
+            else:
+                logger.info("Notification (owner unknown, send /start first): %s", text[:80])
             return
         try:
             await self.bot.send_message(chat_id=int(chat_id), text=text)

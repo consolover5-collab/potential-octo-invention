@@ -331,25 +331,6 @@ class Userbot:
 
     # ── DM ─────────────────────────────────────────────────────────
 
-    async def _send_dm(self, seller_id: int) -> bool:
-        """Legacy DM method (uses dm_message)."""
-        if not self.dm_limiter.consume():
-            logger.warning("DM rate limit reached for seller %d", seller_id)
-            return False
-
-        if self.config.actions.dry_run:
-            logger.info("[DRY RUN] Would send DM to seller %d: %s", seller_id, self.config.actions.dm_message)
-            return True
-
-        try:
-            await self.client.send_message(seller_id, self.config.actions.dm_message)
-            await self.dedup.mark_dm_sent(seller_id)
-            logger.info("DM sent to seller %d", seller_id)
-            return True
-        except Exception as e:
-            logger.error("Failed to send DM to %d: %s", seller_id, e)
-            return False
-
     async def _send_dm_with_template(self, seller_id: int, text: str) -> bool:
         """Send DM with rendered template."""
         if not self.dm_limiter.consume():
