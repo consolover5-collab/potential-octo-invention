@@ -32,6 +32,22 @@ def _db() -> Database:
     return _bot_instance.db
 
 
+def _extract_chat_ref_from_message(message: Message) -> str | None:
+    origin = getattr(message, "forward_origin", None)
+    if origin:
+        chat = getattr(origin, "chat", None)
+        if chat:
+            username = getattr(chat, "username", None)
+            return f"@{username}" if username else str(chat.id)
+
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    if fwd_chat:
+        username = getattr(fwd_chat, "username", None)
+        return f"@{username}" if username else str(fwd_chat.id)
+
+    return None
+
+
 async def _send_qr_image(message: Message, link: str) -> bool:
     try:
         import qrcode
@@ -166,7 +182,7 @@ async def cb_chats(callback: CallbackQuery):
 async def cb_chat_add(callback: CallbackQuery):
     _bot_instance.awaiting[callback.from_user.id] = "chat_add"
     await callback.message.edit_text(
-        "Введите @username или ID чата для добавления:",
+        "Введите @username/ID чата или перешлите сообщение из нужного чата:",
         reply_markup=back_kb(),
     )
     await callback.answer()
@@ -683,7 +699,7 @@ async def handle_text_input(message: Message):
     if not action:
         return
 
-    text = message.text.strip()
+    text = (message.text or message.caption or "").strip()
     if action in {"auth_code", "auth_2fa"}:
         try:
             await message.delete()
@@ -691,20 +707,39 @@ async def handle_text_input(message: Message):
             pass
 
     if action == "chat_add":
-        _cfg().monitoring.chats.append(text)
+        chat_ref = _extract_chat_ref_from_message(message) or text
+        if not chat_ref:
+            _bot_instance.awaiting[message.from_user.id] = "chat_add"
+            await message.answer("❌ Не удалось определить чат. Пришлите @username/ID или перешлите сообщение из чата.")
+            return
+        if chat_ref in _cfg().monitoring.chats:
+            await message.answer(f"ℹ️ Чат {chat_ref} уже в списке.")
+            await message.answer("Главное меню:", reply_markup=main_menu_kb())
+            return
+        _cfg().monitoring.chats.append(chat_ref)
         _save_config()
         if _bot_instance.userbot:
             # Re-register chats requires restart; notify user
-            await message.answer(f"✅ Чат {text} добавлен.\n⚠️ Перезапустите бота для применения.")
+            await message.answer(
+                f"✅ Чат {chat_ref} добавлен.\n"
+                "⚠️ Для применения перезапустите сервис на хосте kc:\n"
+                "<code>sudo systemctl restart tg-parsing</code>",
+                parse_mode="HTML",
+            )
         else:
-            await message.answer(f"✅ Чат {text} добавлен.")
+            await message.answer(f"✅ Чат {chat_ref} добавлен.")
 
     elif action == "chat_del":
         try:
             idx = int(text) - 1
             removed = _cfg().monitoring.chats.pop(idx)
             _save_config()
-            await message.answer(f"✅ Чат {removed} удалён.\n⚠️ Перезапустите бота для применения.")
+            await message.answer(
+                f"✅ Чат {removed} удалён.\n"
+                "⚠️ Для применения перезапустите сервис на хосте kc:\n"
+                "<code>sudo systemctl restart tg-parsing</code>",
+                parse_mode="HTML",
+            )
         except (ValueError, IndexError):
             await message.answer("❌ Неверный номер.")
 
@@ -839,6 +874,27 @@ async def handle_text_input(message: Message):
 @router.message(F.photo)
 async def handle_photo_input(message: Message):
     action = _bot_instance.awaiting.pop(message.from_user.id, None)
+    if action == "chat_add":
+        chat_ref = _extract_chat_ref_from_message(message)
+        if not chat_ref:
+            _bot_instance.awaiting[message.from_user.id] = "chat_add"
+            await message.answer("❌ Не удалось определить чат из пересылки. Перешлите сообщение из чата или введите @username/ID.")
+            return
+        if chat_ref in _cfg().monitoring.chats:
+            await message.answer(f"ℹ️ Чат {chat_ref} уже в списке.")
+            await message.answer("Главное меню:", reply_markup=main_menu_kb())
+            return
+        _cfg().monitoring.chats.append(chat_ref)
+        _save_config()
+        await message.answer(
+            f"✅ Чат {chat_ref} добавлен.\n"
+            "⚠️ Для применения перезапустите сервис на хосте kc:\n"
+            "<code>sudo systemctl restart tg-parsing</code>",
+            parse_mode="HTML",
+        )
+        await message.answer("Главное меню:", reply_markup=main_menu_kb())
+        return
+
     if action != "test":
         return
 
