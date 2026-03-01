@@ -87,19 +87,32 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
-        # Migration: add dm_sent_at column for TTL dedup (safe on existing DBs)
-        try:
-            await self._db.execute(
-                "ALTER TABLE seen_sellers ADD COLUMN dm_sent_at TEXT"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # column already exists
-        await self._db.commit()
+        # Migrations (safe on existing DBs)
+        for stmt in [
+            "ALTER TABLE seen_sellers ADD COLUMN dm_sent_at TEXT",
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        ]:
+            try:
+                await self._db.execute(stmt)
+                await self._db.commit()
+            except Exception:
+                pass
 
     async def close(self):
         if self._db:
             await self._db.close()
+
+    async def get_setting(self, key: str) -> str | None:
+        async with self._db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row["value"] if row else None
+
+    async def set_setting(self, key: str, value: str):
+        await self._db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        await self._db.commit()
 
     async def is_seller_seen(self, seller_id: int, cooldown_hours: int = 25) -> bool:
         """Return True if seller was DM'd within cooldown_hours (0 = forever)."""

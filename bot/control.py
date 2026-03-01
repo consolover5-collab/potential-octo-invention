@@ -174,6 +174,7 @@ def back_kb() -> InlineKeyboardMarkup:
 async def cmd_start(message: Message):
     if _bot_instance.owner_id is None:
         _bot_instance.owner_id = message.from_user.id
+        await _db().set_setting("owner_id", str(message.from_user.id))
     stats = await _db().get_stats()
     chats_count = len(_cfg().monitoring.chats)
     status = "Пауза" if (_bot_instance.userbot and _bot_instance.userbot.paused) else "Активен"
@@ -1170,6 +1171,10 @@ class ControlBot:
 
     async def start(self):
         logger.info("Control bot starting...")
+        saved = await self.db.get_setting("owner_id")
+        if saved:
+            self.owner_id = int(saved)
+            logger.info("Loaded owner_id=%s from DB", saved)
         await self.dp.start_polling(self.bot, handle_signals=False)
 
     async def stop(self):
