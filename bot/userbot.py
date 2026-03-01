@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 
 from telethon import TelegramClient, events
 from telethon.errors import (
@@ -18,6 +19,7 @@ from bot.price import extract_price
 from bot.dedup import DedupChecker
 from bot.ratelimit import RateLimiter
 from bot.vision import analyse_image, parse_vision_response
+from bot.nlp import analyse_text, generate_dm, looks_like_listing
 from bot.processor import MessageProcessor
 from db.database import Database
 
@@ -40,7 +42,14 @@ class Userbot:
         self.vision_limiter = vision_limiter
         self.db = db
         self.notify = notify_callback  # async fn(text: str)
-        self.matcher = KeywordMatcher(config.monitoring.keywords)
+        self.matcher = KeywordMatcher(
+            config.monitoring.keywords,
+            keyword_map=config.rules.keyword_map,
+        )
+        self.nlp_limiter = RateLimiter(
+            max_tokens=config.monitoring.text_nlp_per_minute,
+            period_seconds=60.0,
+        )
         self.paused = False
         self.processor = MessageProcessor(config, db)
 
@@ -194,6 +203,18 @@ class Userbot:
 
     # ── Main pipeline ──────────────────────────────────────────────
 
+    def _msg_link(self, msg: Message) -> str:
+        """Build a clickable Telegram message link."""
+        try:
+            if msg.chat.username:
+                return f"https://t.me/{msg.chat.username}/{msg.id}"
+        except AttributeError:
+            pass
+        cid = abs(msg.chat_id)
+        if cid > 1_000_000_000:
+            cid = int(str(cid)[3:])  # strip -100 prefix for t.me/c/ format
+        return f"https://t.me/c/{cid}/{msg.id}"
+
     async def _process_message(self, msg: Message):
         seller_id = msg.sender_id
         if not seller_id:
@@ -204,20 +225,30 @@ class Userbot:
         match_type = None
         matched_value = None
         price = None
+        nlp_dm_text: str | None = None
 
-        # Step 1: keyword match on text
+        # Step 1: keyword/synonym match on text
         if msg.text:
             kw = self.matcher.match(msg.text)
             if kw:
                 match_type = "keyword"
-                # Check if keyword_map provides a type
-                if kw in self.config.rules.keyword_map:
-                    matched_value = self.config.rules.keyword_map[kw]
-                else:
-                    matched_value = kw
+                # keyword_map str values are type-labels; list values are synonyms (already matched)
+                kmap_val = self.config.rules.keyword_map.get(kw)
+                matched_value = kmap_val if isinstance(kmap_val, str) else kw
                 price = extract_price(msg.text)
 
-        # Step 2: vision (if no keyword match and photo present)
+        # Step 1b: Groq text NLP fallback (when keywords miss + looks like a listing)
+        if not match_type and msg.text and self.config.monitoring.use_text_nlp:
+            if looks_like_listing(msg.text):
+                targets = self.config.monitoring.keywords or list(self.config.rules.keyword_map.keys())
+                nlp = await analyse_text(msg.text, targets, self.config, self.nlp_limiter)
+                if nlp and nlp["match"]:
+                    match_type = "nlp"
+                    matched_value = nlp["type"] or targets[0] if targets else "товар"
+                    price = price or nlp["price"]
+                    nlp_dm_text = nlp["dm"] or None
+
+        # Step 2: vision (if no match yet and photo present)
         if not match_type and msg.photo and self.config.rules.vision_enabled:
             vision_result = await self._try_vision(msg)
             if vision_result:
@@ -235,7 +266,7 @@ class Userbot:
             return
 
         # Prepare metadata
-        link = f"https://t.me/c/{abs(msg.chat_id)}/{msg.id}"
+        link = self._msg_link(msg)
         meta = {
             "type": matched_value,
             "price": price,
@@ -248,7 +279,7 @@ class Userbot:
             "matched_value": matched_value,
         }
 
-        # Store message in new schema
+        # Store message
         msg_uuid = await self.processor.store_message(
             chat_external=chat_external,
             chat_title=chat,
@@ -258,8 +289,11 @@ class Userbot:
             meta=meta
         )
 
-        # Step 4: dedup check
-        is_dup = await self.dedup.is_seen(seller_id)
+        # Step 4: dedup check (bypass for no_dedup_ids)
+        no_dedup = seller_id in (self.config.actions.no_dedup_ids or [])
+        is_dup = False if no_dedup else await self.dedup.is_seen(
+            seller_id, cooldown_hours=self.config.actions.dm_cooldown_hours
+        )
 
         if is_dup:
             await self.dedup.record_match(
@@ -267,25 +301,33 @@ class Userbot:
                 match_type, matched_value, price, is_duplicate=True,
             )
             await self._notify_duplicate(chat, seller_id)
-            # Log duplicate - no actions taken
-            await self.db.log_action(msg_uuid, "duplicate", "skipped", {"reason": "seller already seen"})
+            await self.db.log_action(msg_uuid, "duplicate", "skipped", {"reason": "seller in cooldown"})
         else:
-            # New seller
-            await self.dedup.register(
-                seller_id, chat, msg.id, match_type, matched_value, price,
-            )
+            if not no_dedup:
+                await self.dedup.register(
+                    seller_id, chat, msg.id, match_type, matched_value, price,
+                )
             await self.dedup.record_match(
                 seller_id, msg.chat_id, msg.id,
                 match_type, matched_value, price, is_duplicate=False,
             )
 
-            # Decide actions using processor
+            # Decide actions
             actions = self.processor.decide_actions(chat_external, seller_id, meta)
+
+            # Override DM text with Groq-generated version if applicable
+            if actions.get("should_dm") and self.config.actions.use_groq_dm:
+                groq_text = nlp_dm_text  # already generated during NLP step
+                if not groq_text:
+                    groq_text = await generate_dm(
+                        msg.text or matched_value, matched_value, self.config
+                    )
+                if groq_text:
+                    actions = dict(actions, dm_text=groq_text)
 
             dm_sent = False
             forward_sent = False
 
-            # Execute forward action
             if actions["should_forward"]:
                 forward_sent = await self._forward_message(msg, meta)
                 await self.db.log_action(
@@ -294,16 +336,15 @@ class Userbot:
                     {"mode": self.config.actions.forward_mode.value, "dry_run": self.config.actions.dry_run}
                 )
 
-            # Execute DM action
             if actions["should_dm"]:
                 dm_sent = await self._send_dm_with_template(seller_id, actions["dm_text"])
                 await self.db.log_action(
                     msg_uuid, "dm",
                     "success" if dm_sent else "failed",
-                    {"template_used": True, "dry_run": self.config.actions.dry_run}
+                    {"template_used": True, "groq_dm": self.config.actions.use_groq_dm,
+                     "dry_run": self.config.actions.dry_run}
                 )
 
-            # Notify
             await self._notify_new(chat, match_type, matched_value, price, dm_sent, msg, forward_sent)
 
     # ── Vision ─────────────────────────────────────────────────────
@@ -311,6 +352,14 @@ class Userbot:
     async def _try_vision(self, msg: Message) -> dict | None:
         if not self.config.vision.api_key:
             return None
+
+        # Caption pre-filter: skip photos that don't look like listings
+        if self.config.monitoring.vision_require_listing_signal:
+            caption = (msg.text or msg.message or "").strip()
+            if not looks_like_listing(caption):
+                logger.debug("Vision skipped: caption has no listing signal")
+                return None
+
         if not self.vision_limiter.consume():
             logger.debug("Vision rate limit reached, skipping")
             return None
@@ -329,17 +378,28 @@ class Userbot:
             logger.error("Vision processing error: %s", e)
             return None
 
+
     # ── DM ─────────────────────────────────────────────────────────
 
     async def _send_dm_with_template(self, seller_id: int, text: str) -> bool:
-        """Send DM with rendered template."""
+        """Send DM with rendered template, with human-like delay."""
         if not self.dm_limiter.consume():
             logger.warning("DM rate limit reached for seller %d", seller_id)
             return False
 
+        # Human-like delay
+        delay_min = self.config.actions.dm_delay_min
+        delay_max = max(delay_min, self.config.actions.dm_delay_max)
+        delay = random.uniform(delay_min, delay_max)
+
         if self.config.actions.dry_run:
-            logger.info("[DRY RUN] Would send DM to seller %d: %s", seller_id, text[:100])
+            logger.info(
+                "[DRY RUN] Would send DM to %d in %.0fs: %s", seller_id, delay, text[:100]
+            )
             return True
+
+        logger.info("Waiting %.0fs before DM to seller %d (human-like delay)", delay, seller_id)
+        await asyncio.sleep(delay)
 
         try:
             await self.client.send_message(seller_id, text)
@@ -382,7 +442,7 @@ class Userbot:
         price_str = f"{price:,} ₽".replace(",", " ") if price else "—"
         dm_str = "✉️ DM отправлен продавцу" if dm_sent else "⚠️ DM не отправлен (лимит или выключен)"
         forward_str = "📤 Переслано" if forward_sent else ""
-        link = f"https://t.me/c/{abs(msg.chat_id)}/{msg.id}"
+        link = self._msg_link(msg)
 
         parts = [
             f"🔔 Новое совпадение!",

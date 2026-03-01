@@ -514,44 +514,44 @@ async def cb_actions_menu(callback: CallbackQuery):
     auto_dm_status = "вкл" if cfg.actions.auto_dm else "выкл"
     forward_status = "вкл" if cfg.actions.forward_to_main_bot else "выкл"
     dry_run_status = "вкл" if cfg.actions.dry_run else "выкл"
+    groq_dm_status = "вкл" if cfg.actions.use_groq_dm else "выкл"
+    nlp_status = "вкл" if cfg.monitoring.use_text_nlp else "выкл"
+    vision_signal = "вкл" if cfg.monitoring.vision_require_listing_signal else "выкл"
+    cooldown = cfg.actions.dm_cooldown_hours
+    delay_range = f"{cfg.actions.dm_delay_min}–{cfg.actions.dm_delay_max}с"
+    no_dedup = len(cfg.actions.no_dedup_ids)
 
     text = (
-        f"🎯 Управление действиями\n\n"
+        f"🎯 <b>Управление действиями</b>\n\n"
         f"✉️ Авто-DM: {auto_dm_status}\n"
         f"📤 Пересылка боту: {forward_status}\n"
         f"🔧 Режим пересылки: {cfg.actions.forward_mode.value}\n"
-        f"🧪 Dry-run: {dry_run_status}"
+        f"🧪 Dry-run: {dry_run_status}\n"
+        f"⏱ Задержка перед DM: {delay_range}\n"
+        f"🔁 Повтор DM через: {cooldown} ч (0 = никогда)\n"
+        f"🧬 Groq NLP (семантика): {nlp_status} / {cfg.monitoring.text_nlp_per_minute} зап/мин\n"
+        f"🖼 Vision только по объявлениям: {vision_signal}\n"
+        f"🤖 Groq DM (генерация текста): {groq_dm_status}\n"
+        f"🚷 Без дедупа (тест): {no_dedup} user_id"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"✉️ Авто-DM: {auto_dm_status}",
-            callback_data="toggle_auto_dm"
-        )],
-        [InlineKeyboardButton(
-            text=f"📤 Пересылка: {forward_status}",
-            callback_data="toggle_forward"
-        )],
-        [InlineKeyboardButton(
-            text=f"🔧 Режим: {cfg.actions.forward_mode.value}",
-            callback_data="toggle_forward_mode"
-        )],
-        [InlineKeyboardButton(
-            text=f"🧪 Dry-run: {dry_run_status}",
-            callback_data="toggle_dry_run"
-        )],
-        [InlineKeyboardButton(
-            text="📝 Редактировать шаблон DM",
-            callback_data="edit_dm_template"
-        )],
-        [InlineKeyboardButton(
-            text="🚫 Список opt-out",
-            callback_data="opt_out_list"
-        )],
+        [InlineKeyboardButton(text=f"✉️ Авто-DM: {auto_dm_status}", callback_data="toggle_auto_dm")],
+        [InlineKeyboardButton(text=f"📤 Пересылка: {forward_status}", callback_data="toggle_forward")],
+        [InlineKeyboardButton(text=f"🔧 Режим: {cfg.actions.forward_mode.value}", callback_data="toggle_forward_mode")],
+        [InlineKeyboardButton(text=f"🧪 Dry-run: {dry_run_status}", callback_data="toggle_dry_run")],
+        [InlineKeyboardButton(text=f"⏱ Задержка: {delay_range}", callback_data="set_dm_delay")],
+        [InlineKeyboardButton(text=f"🔁 Повтор через: {cooldown} ч", callback_data="set_dm_cooldown")],
+        [InlineKeyboardButton(text=f"🧬 Groq NLP: {nlp_status}", callback_data="toggle_text_nlp")],
+        [InlineKeyboardButton(text=f"🖼 Vision по объявлениям: {vision_signal}", callback_data="toggle_vision_signal")],
+        [InlineKeyboardButton(text=f"🤖 Groq DM: {groq_dm_status}", callback_data="toggle_groq_dm")],
+        [InlineKeyboardButton(text="📝 Редактировать шаблон DM", callback_data="edit_dm_template")],
+        [InlineKeyboardButton(text="🚫 Opt-out список", callback_data="opt_out_list")],
+        [InlineKeyboardButton(text="🚷 Без дедупа (тест)", callback_data="no_dedup_list")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu")],
     ])
 
-    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -593,6 +593,104 @@ async def cb_toggle_dry_run(callback: CallbackQuery):
     status = "вкл" if _cfg().actions.dry_run else "выкл"
     await callback.answer(f"Dry-run: {status}", show_alert=True)
     await cb_actions_menu(callback)
+
+
+@router.callback_query(F.data == "toggle_text_nlp")
+async def cb_toggle_text_nlp(callback: CallbackQuery):
+    _cfg().monitoring.use_text_nlp = not _cfg().monitoring.use_text_nlp
+    _save_config()
+    status = "вкл" if _cfg().monitoring.use_text_nlp else "выкл"
+    await callback.answer(f"Groq NLP: {status}", show_alert=True)
+    await cb_actions_menu(callback)
+
+
+@router.callback_query(F.data == "toggle_vision_signal")
+async def cb_toggle_vision_signal(callback: CallbackQuery):
+    _cfg().monitoring.vision_require_listing_signal = not _cfg().monitoring.vision_require_listing_signal
+    _save_config()
+    status = "вкл" if _cfg().monitoring.vision_require_listing_signal else "выкл"
+    await callback.answer(f"Vision только по объявлениям: {status}", show_alert=True)
+    await cb_actions_menu(callback)
+
+
+@router.callback_query(F.data == "toggle_groq_dm")
+async def cb_toggle_groq_dm(callback: CallbackQuery):
+    _cfg().actions.use_groq_dm = not _cfg().actions.use_groq_dm
+    _save_config()
+    status = "вкл" if _cfg().actions.use_groq_dm else "выкл"
+    await callback.answer(f"Groq DM: {status}", show_alert=True)
+    await cb_actions_menu(callback)
+
+
+@router.callback_query(F.data == "set_dm_delay")
+async def cb_set_dm_delay(callback: CallbackQuery):
+    cfg = _cfg()
+    _bot_instance.awaiting[callback.from_user.id] = "set_dm_delay"
+    await callback.message.edit_text(
+        f"⏱ Текущая задержка: {cfg.actions.dm_delay_min}–{cfg.actions.dm_delay_max} с\n\n"
+        "Введите диапазон в формате <code>МИН МАКС</code> (в секундах), например:\n"
+        "<code>60 120</code> — от 1 до 2 минут\n"
+        "<code>30 60</code> — от 30 секунд до 1 минуты\n"
+        "<code>0 0</code> — без задержки",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set_dm_cooldown")
+async def cb_set_dm_cooldown(callback: CallbackQuery):
+    _bot_instance.awaiting[callback.from_user.id] = "set_dm_cooldown"
+    await callback.message.edit_text(
+        f"🔁 Текущий период повтора DM: {_cfg().actions.dm_cooldown_hours} ч\n\n"
+        "Введите количество часов (0 = никогда не повторять):",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "no_dedup_list")
+async def cb_no_dedup_list(callback: CallbackQuery):
+    ids = _cfg().actions.no_dedup_ids or []
+    if ids:
+        lines = [f"  {i+1}. {uid}" for i, uid in enumerate(ids)]
+        text = "🚷 <b>Без дедупа</b> (всегда пишем, для тестов):\n" + "\n".join(lines)
+    else:
+        text = "🚷 Список без дедупа пуст."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ Добавить", callback_data="no_dedup_add"),
+            InlineKeyboardButton(text="➖ Удалить", callback_data="no_dedup_del"),
+        ],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="actions_menu")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "no_dedup_add")
+async def cb_no_dedup_add(callback: CallbackQuery):
+    _bot_instance.awaiting[callback.from_user.id] = "no_dedup_add"
+    await callback.message.edit_text(
+        "Введите user_id для добавления (без дедупа):",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "no_dedup_del")
+async def cb_no_dedup_del(callback: CallbackQuery):
+    ids = _cfg().actions.no_dedup_ids or []
+    if not ids:
+        await callback.answer("Список пуст", show_alert=True)
+        return
+    _bot_instance.awaiting[callback.from_user.id] = "no_dedup_del"
+    lines = [f"  {i+1}. {uid}" for i, uid in enumerate(ids)]
+    await callback.message.edit_text(
+        "Введите номер для удаления:\n" + "\n".join(lines),
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "edit_dm_template")
@@ -929,6 +1027,53 @@ async def handle_text_input(message: Message):
             removed = _cfg().rules.opt_out_list.pop(idx)
             _save_config()
             await message.answer(f"✅ User {removed} удалён из opt-out")
+        except (ValueError, IndexError):
+            await message.answer("❌ Неверный номер.")
+
+    elif action == "set_dm_delay":
+        parts = text.split()
+        try:
+            mn, mx = int(parts[0]), int(parts[1]) if len(parts) > 1 else int(parts[0])
+            if mn < 0 or mx < mn:
+                raise ValueError
+            _cfg().actions.dm_delay_min = mn
+            _cfg().actions.dm_delay_max = mx
+            _save_config()
+            await message.answer(f"✅ Задержка: {mn}–{mx} с")
+        except (ValueError, IndexError):
+            await message.answer("❌ Формат: МИН МАКС (числа, например: 60 120)")
+
+    elif action == "set_dm_cooldown":
+        try:
+            hours = int(text)
+            if hours < 0:
+                raise ValueError
+            _cfg().actions.dm_cooldown_hours = hours
+            _save_config()
+            label = f"{hours} ч" if hours > 0 else "никогда не повторять"
+            await message.answer(f"✅ Повтор DM через: {label}")
+        except ValueError:
+            await message.answer("❌ Введите целое число часов (0 = никогда)")
+
+    elif action == "no_dedup_add":
+        try:
+            user_id = int(text)
+            ids = _cfg().actions.no_dedup_ids
+            if user_id not in ids:
+                ids.append(user_id)
+                _save_config()
+                await message.answer(f"✅ User {user_id} добавлен (без дедупа)")
+            else:
+                await message.answer(f"⚠️ User {user_id} уже в списке")
+        except ValueError:
+            await message.answer("❌ Введите число (user_id)")
+
+    elif action == "no_dedup_del":
+        try:
+            idx = int(text) - 1
+            removed = _cfg().actions.no_dedup_ids.pop(idx)
+            _save_config()
+            await message.answer(f"✅ User {removed} удалён из списка без дедупа")
         except (ValueError, IndexError):
             await message.answer("❌ Неверный номер.")
 

@@ -87,15 +87,37 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # Migration: add dm_sent_at column for TTL dedup (safe on existing DBs)
+        try:
+            await self._db.execute(
+                "ALTER TABLE seen_sellers ADD COLUMN dm_sent_at TEXT"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # column already exists
         await self._db.commit()
 
     async def close(self):
         if self._db:
             await self._db.close()
 
-    async def is_seller_seen(self, seller_id: int) -> bool:
+    async def is_seller_seen(self, seller_id: int, cooldown_hours: int = 25) -> bool:
+        """Return True if seller was DM'd within cooldown_hours (0 = forever)."""
+        if cooldown_hours == 0:
+            async with self._db.execute(
+                "SELECT 1 FROM seen_sellers WHERE seller_id = ? AND dm_sent = 1", (seller_id,)
+            ) as cur:
+                return await cur.fetchone() is not None
         async with self._db.execute(
-            "SELECT 1 FROM seen_sellers WHERE seller_id = ?", (seller_id,)
+            "SELECT dm_sent_at FROM seen_sellers WHERE seller_id = ? AND dm_sent = 1",
+            (seller_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or row["dm_sent_at"] is None:
+            return False
+        async with self._db.execute(
+            "SELECT 1 WHERE datetime(?) > datetime('now', ?)",
+            (row["dm_sent_at"], f"-{cooldown_hours} hours"),
         ) as cur:
             return await cur.fetchone() is not None
 
@@ -112,11 +134,19 @@ class Database:
             await self._db.commit()
             return True
         except aiosqlite.IntegrityError:
-            return False
+            # Seller already in table — update record for new listing
+            await self._db.execute(
+                "UPDATE seen_sellers SET first_chat=?, first_msg_id=?, match_type=?, "
+                "matched_value=?, price=?, dm_sent=0, dm_sent_at=NULL WHERE seller_id=?",
+                (chat, msg_id, match_type, matched_value, price, seller_id),
+            )
+            await self._db.commit()
+            return True
 
     async def mark_dm_sent(self, seller_id: int):
         await self._db.execute(
-            "UPDATE seen_sellers SET dm_sent = 1 WHERE seller_id = ?", (seller_id,)
+            "UPDATE seen_sellers SET dm_sent = 1, dm_sent_at = datetime('now') WHERE seller_id = ?",
+            (seller_id,),
         )
         await self._db.commit()
 

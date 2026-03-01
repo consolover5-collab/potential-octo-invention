@@ -7,8 +7,8 @@ class DedupChecker:
     def __init__(self, db: Database):
         self._db = db
 
-    async def is_seen(self, seller_id: int) -> bool:
-        return await self._db.is_seller_seen(seller_id)
+    async def is_seen(self, seller_id: int, cooldown_hours: int = 25) -> bool:
+        return await self._db.is_seller_seen(seller_id, cooldown_hours)
 
     async def register(
         self,
