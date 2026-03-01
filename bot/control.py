@@ -961,6 +961,7 @@ async def cb_help(callback: CallbackQuery):
 async def cb_limits(callback: CallbackQuery):
     from bot.vision import _groq_rate_info
 
+    cfg = _cfg()
     dm = _bot_instance.dm_limiter
     vis = _bot_instance.vision_limiter
 
@@ -990,9 +991,69 @@ async def cb_limits(callback: CallbackQuery):
         groq_lines = "\n🌐 <b>Groq API</b>: нет данных (Vision ещё не вызывался)"
 
     text = f"📊 <b>Лимиты</b>\n\n{dm_line}"
+
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"✉️ DM/час: {cfg.rate_limits.dm_per_hour}",
+            callback_data="edit_dm_limit",
+        )],
+    ]
+
     if _has_groq():
         text += f"\n{vis_line}{groq_lines}"
-    await callback.message.edit_text(text, reply_markup=back_kb("settings"), parse_mode="HTML")
+        buttons.append(
+            [InlineKeyboardButton(
+                text=f"👁 Vision/мин: {cfg.rate_limits.vision_per_minute}",
+                callback_data="edit_vision_limit",
+            )]
+        )
+        buttons.append(
+            [InlineKeyboardButton(
+                text=f"🧬 NLP/мин: {cfg.monitoring.text_nlp_per_minute}",
+                callback_data="edit_nlp_limit",
+            )]
+        )
+
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="settings")])
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_dm_limit")
+async def cb_edit_dm_limit(callback: CallbackQuery):
+    _bot_instance.awaiting[callback.from_user.id] = "edit_dm_limit"
+    await callback.message.edit_text(
+        f"✉️ Текущий лимит DM: {_cfg().rate_limits.dm_per_hour}/час\n"
+        "Введите новое значение:",
+        reply_markup=back_kb("limits"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_vision_limit")
+async def cb_edit_vision_limit(callback: CallbackQuery):
+    _bot_instance.awaiting[callback.from_user.id] = "edit_vision_limit"
+    await callback.message.edit_text(
+        f"👁 Текущий лимит Vision: {_cfg().rate_limits.vision_per_minute}/мин\n"
+        "Введите новое значение:",
+        reply_markup=back_kb("limits"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_nlp_limit")
+async def cb_edit_nlp_limit(callback: CallbackQuery):
+    _bot_instance.awaiting[callback.from_user.id] = "edit_nlp_limit"
+    await callback.message.edit_text(
+        f"🧬 Текущий лимит NLP: {_cfg().monitoring.text_nlp_per_minute}/мин\n"
+        "Введите новое значение:",
+        reply_markup=back_kb("limits"),
+    )
     await callback.answer()
 
 
@@ -1251,6 +1312,39 @@ async def handle_text_input(message: Message):
             await message.answer(f"✅ Синоним «{removed}» удалён из «{kw}»")
         except (ValueError, IndexError):
             await message.answer("❌ Неверный номер.")
+
+    elif action == "edit_dm_limit":
+        try:
+            val = int(text)
+            if val < 1:
+                raise ValueError
+            _cfg().rate_limits.dm_per_hour = val
+            _save_config()
+            await message.answer(f"✅ Лимит DM: {val}/час")
+        except ValueError:
+            await message.answer("❌ Введите положительное число")
+
+    elif action == "edit_vision_limit":
+        try:
+            val = int(text)
+            if val < 1:
+                raise ValueError
+            _cfg().rate_limits.vision_per_minute = val
+            _save_config()
+            await message.answer(f"✅ Лимит Vision: {val}/мин")
+        except ValueError:
+            await message.answer("❌ Введите положительное число")
+
+    elif action == "edit_nlp_limit":
+        try:
+            val = int(text)
+            if val < 1:
+                raise ValueError
+            _cfg().monitoring.text_nlp_per_minute = val
+            _save_config()
+            await message.answer(f"✅ Лимит NLP: {val}/мин")
+        except ValueError:
+            await message.answer("❌ Введите положительное число")
 
     await message.answer("Главное меню:", reply_markup=main_menu_kb())
 
