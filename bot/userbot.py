@@ -232,9 +232,13 @@ class Userbot:
             kw = self.matcher.match(msg.text)
             if kw:
                 match_type = "keyword"
-                # keyword_map str values are type-labels; list values are synonyms (already matched)
-                kmap_val = self.config.rules.keyword_map.get(kw)
-                matched_value = kmap_val if isinstance(kmap_val, str) else kw
+                # Resolve synonym stem back to category key (e.g. "акустик" → "колонка")
+                resolved = self.matcher.resolve_key(kw)
+                if resolved:
+                    matched_value = resolved
+                else:
+                    kmap_val = self.config.rules.keyword_map.get(kw)
+                    matched_value = kmap_val if isinstance(kmap_val, str) else kw
                 price = extract_price(msg.text)
 
         # Step 1b: Groq text NLP fallback (when keywords miss + looks like a listing)

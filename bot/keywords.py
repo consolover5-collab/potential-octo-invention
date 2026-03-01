@@ -22,6 +22,7 @@ class KeywordMatcher:
                  keyword_map: dict[str, list[str]] | None = None):
         self._keywords: list[str] = []
         self._pattern: re.Pattern | None = None
+        self._stem_to_key: dict[str, str] = {}  # stem → keyword_map key
         if keywords or keyword_map:
             self.update(keywords or [], keyword_map or {})
 
@@ -32,13 +33,17 @@ class KeywordMatcher:
         (synonym group). Synonyms are stem-matched the same way as keywords.
         """
         terms = [k.strip().lower() for k in keywords if k.strip()]
+        self._stem_to_key = {}
 
         # Expand synonym groups from keyword_map
         if keyword_map:
-            for _key, value in keyword_map.items():
+            for key, value in keyword_map.items():
                 if isinstance(value, list):
-                    terms.extend(v.strip().lower() for v in value if v.strip())
-                # str values are type-labels, not synonyms — skip them
+                    for v in value:
+                        v = v.strip().lower()
+                        if v:
+                            terms.append(v)
+                            self._stem_to_key[_stem(v)] = key
 
         self._keywords = list(dict.fromkeys(terms))  # deduplicate, preserve order
         if self._keywords:
@@ -56,6 +61,10 @@ class KeywordMatcher:
             return None
         m = self._pattern.search(text)
         return m.group(0).lower() if m else None
+
+    def resolve_key(self, matched_stem: str) -> str | None:
+        """Resolve a matched stem back to its keyword_map key (e.g. 'акустик' → 'колонка')."""
+        return self._stem_to_key.get(matched_stem) or self._stem_to_key.get(_stem(matched_stem))
 
     @property
     def keywords(self) -> list[str]:

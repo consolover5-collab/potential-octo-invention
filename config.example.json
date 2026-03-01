@@ -10,7 +10,6 @@
     "chats": ["@cg_baraholka"],
     "keywords": ["телевизор", "колонка", "jbl"],
     "max_price": 30000,
-    "use_vision": true,
     "vision_prompt": "На фото телевизор, колонка или аудиосистема? Если да — ответь: ТИП: ..., ЦЕНА: ... Если нет — ответь: НЕТ",
     "vision_require_listing_signal": true,
     "use_text_nlp": false,
@@ -18,12 +17,11 @@
   },
   "vision": {
     "provider": "groq",
-    "api_key": "your_groq_api_key",
+    "api_key": "",
     "model": "meta-llama/llama-4-scout-17b-16e-instruct",
     "base_url": "https://api.groq.com/openai/v1/chat/completions"
   },
   "actions": {
-    "dm_message": "Привет, ещё доступно?",
     "notify_chat_id": "me",
     "auto_dm": true,
     "forward_to_main_bot": false,
@@ -38,18 +36,11 @@
   },
   "rules": {
     "keyword_map": {
-      "колонка": ["колонка", "акустика", "speaker", "JBL", "bluetooth", "саундбар", "бас"],
-      "телевизор": ["телевизор", "телек", "экран", "плазма", "OLED", "QLED"]
+      "колонка": ["акустика", "speaker", "JBL", "bluetooth", "саундбар", "бас"],
+      "телевизор": ["телек", "экран", "плазма", "OLED", "QLED"]
     },
     "vision_enabled": true,
-    "vision_precedence": "keywords",
-    "per_chat_overrides": {
-      "@special_chat": {
-        "auto_dm": false,
-        "forward_to_main_bot": true,
-        "dm_template": "Специальный шаблон для этого чата: {type} - {price}"
-      }
-    },
+    "per_chat_overrides": {},
     "opt_out_list": []
   },
   "rate_limits": {

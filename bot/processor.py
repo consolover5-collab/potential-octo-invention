@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from bot.models import Config, ForwardMode, VisionPrecedence
+from bot.models import Config, ForwardMode
 from db.database import Database
 
 logger = logging.getLogger(__name__)
